@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <!-- CSP is declared once, in src-tauri/tauri.conf.json (app.security.csp). -->
+  <title>Mehedi Clipboard Copy &amp; Paste</title>
+  <style>
+    /* Single source of truth for the virtualized row pitch (height + gap):
+       renderer-utils.js reads --row-h, so CSS and the scroll math cannot drift. */
+    :root { --row-h: 42px; --row-gap: 4px; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { overflow: hidden; height: 100%; }
+    body {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      min-width: 320px;
+      height: 100%;
+      margin: 0;
+      padding: 3px 8px 8px;
+      font-family: Arial, sans-serif;
+      background-color: #f9f9f9;
+      color: #333;
+    }
+
+    /* ---- Title bar (custom, decorations: false) ---- */
+    #titleBar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin: 0;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    #titleBar h2 { flex: 1; min-width: 0; margin: 0; }
+    #winCloseBtn {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      background: transparent;
+      border-radius: 6px;
+      transition: background-color 0.15s, transform 0.1s;
+    }
+    #winCloseBtn:hover { background: #fdecea; }
+    #winCloseBtn:active { transform: scale(0.94); }
+    #winCloseBtn img { width: 22px; height: 22px; display: block; pointer-events: none; }
+
+    /* ---- Header title ---- */
+    h2 {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.1;
+      letter-spacing: 0.4px;
+      text-align: center;
+      color: #0582f7;
+      text-shadow:
+        0 1px 0 #ffffff,
+        0 2px 3px rgba(44, 62, 80, 0.28),
+        0 6px 14px rgba(52, 152, 219, 0.30);
+    }
+
+    button {
+      padding: 5px 8px;
+      font-size: 12px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      background-color: #3498db;
+      color: white;
+    }
+    button:hover { background-color: #2980b9; }
+    button:focus-visible, [role="button"]:focus-visible, [role="tab"]:focus-visible, label:focus-visible {
+      outline: 3px solid #1f6fa5;
+      outline-offset: 2px;
+    }
+    input[type="file"] { display: none; }
+
+    /* ---- Layout: top icon bar + content ---- */
+    .app-body {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 4px;
+      flex: 1;
+      min-height: 0;
+      margin-top: 3px;
+    }
+    #sideRail {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+      padding: 4px;
+      background: #ffffff;
+      border: 1px solid #e3e7ea;
+      border-radius: 8px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .rail-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      padding: 5px;
+      background: #f4f7f9;
+      border: 1px solid #e1e6ea;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background-color 0.15s, transform 0.1s, border-color 0.15s;
+    }
+    .rail-btn:hover {
+      background: #eaf4fc;
+      border-color: #3498db;
+      transform: translateY(-1px);
+    }
+    .rail-btn:active { transform: scale(0.94); }
+    .rail-btn img { width: 18px; height: 18px; display: block; pointer-events: none; }
+    .main-col {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    /* ---- Action row (only visible when there are unpinned items) ---- */
+    #actionRow {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+    #actionRow:empty { display: none; }
+    #clearAllInline { background: #95a5a6; padding: 5px 10px; font-size: 12px; }
+    #clearAllInline:hover { background: #7f8c8d; }
+
+    /* ---- Tabs (multi-file session) ---- */
+    #tabsBar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-bottom: 2px;
+    }
+    #tabsBar:empty { display: none; margin-bottom: 0; }
+    .tab {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      max-width: 110px;
+      padding: 3px 6px;
+      font-size: 10px;
+      background: #ecf0f1;
+      color: #2c3e50;
+      border: 1px solid #dfe4e6;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .tab:hover { background: #e3e9ec; }
+    .tab.active { background: #3498db; border-color: #3498db; color: #fff; }
+    .tab.drag-over { outline: 2px dashed #3498db; outline-offset: 1px; }
+    .tab.dragging { opacity: 0.5; }
+    .tab .tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tab .tab-close, .tab .tab-rename {
+      padding: 0;
+      color: inherit;
+      background: transparent;
+      line-height: 1;
+      opacity: 0.7;
+    }
+    .tab .tab-close { width: 18px; height: 18px; font-size: 12px; }
+    .tab .tab-rename { width: 16px; height: 16px; font-size: 10px; }
+    .tab .tab-close:hover, .tab .tab-rename:hover { opacity: 1; }
+
+    #clipboardList {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      word-break: break-word;
+      border-top: 1px solid #ddd;
+      padding-top: 2px;
+      /* Wheel scrolling is eased in JS (smooth-scroll.js): CSS `smooth` fights the
+         row virtualization and stutters, and the native wheel jump is ~3 lines
+         per notch, which teleports the list in a 450 px window. */
+      scroll-behavior: auto;
+      /* The virtualizer replaces rows and changes spacer heights while moving.
+         WebView2 scroll anchoring otherwise adjusts scrollTop a second time,
+         after smooth-scroll.js has already applied the intended position. */
+      overflow-anchor: none;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      /* pan-y keeps touch/pen panning native while the wheel stays ours */
+      touch-action: pan-y;
+      contain: layout paint;
+      will-change: scroll-position;
+      scrollbar-width: thin;
+      scrollbar-color: #b9c4cc transparent;
+    }
+    #clipboardList > *,
+    #clipboardList .clip-item { overflow-anchor: none; }
+    #clipboardList::-webkit-scrollbar { width: 9px; }
+    #clipboardList::-webkit-scrollbar-track { background: transparent; }
+    #clipboardList::-webkit-scrollbar-thumb {
+      background: #c3ccd3;
+      border-radius: 6px;
+      border: 2px solid #f9f9f9;
+    }
+    #clipboardList::-webkit-scrollbar-thumb:hover { background: #9fadb7; }
+
+    .clip-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: calc(var(--row-h) - var(--row-gap));
+      background: #fff;
+      padding: 6px;
+      margin-bottom: var(--row-gap);
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      touch-action: pan-y;
+      transition: background-color 0.15s, border-color 0.15s;
+    }
+    .clip-item:hover { background: #eaf4fc; border-color: #3498db; }
+    .clip-item.selected {
+      background: #eaf4fc;
+      border-color: #3498db;
+      box-shadow: inset 3px 0 0 #3498db;
+    }
+    .clip-item.draggable-row { touch-action: none; cursor: grab; }
+    .clip-item.dragging {
+      opacity: 0.9;
+      border-style: dashed;
+      position: relative;
+      z-index: 5;
+      will-change: transform;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.25);
+    }
+    .clip-item.drag-over { border-color: #3498db; box-shadow: 0 -2px 0 #3498db inset, 0 0 0 1px #3498db; }
+    .clip-item.drag-below { border-color: #3498db; box-shadow: 0 2px 0 #3498db inset, 0 0 0 1px #3498db; }
+    body.row-dragging { user-select: none; cursor: grabbing; }
+    body.row-dragging .clip-item { cursor: grabbing; }
+
+    .clip-item .pin-mark { flex-shrink: 0; width: 13px; height: 13px; display: block; }
+    /* Each row shows at most 2 lines of text - comfortable to read */
+    .clip-text {
+      flex: 1;
+      min-width: 0;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: normal;
+      line-height: 1.35;
+      max-height: 2.6em;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+    /* The vertical-dots button is enlarged for easier clicking */
+    .menu-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      align-self: center;
+      flex-shrink: 0;
+      width: 24px;
+      height: 28px;
+      padding: 0;
+      background: #3498db;
+      color: #fff;
+      font-size: 18px;
+      line-height: 1;
+      border-radius: 5px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+      transition: transform 0.1s, background-color 0.15s;
+    }
+    .menu-btn:hover { background: #2980b9; transform: scale(1.05); }
+    .menu-btn:active { transform: scale(0.95); }
+
+    /* ---- Dropdown menu (right top-side of the 3-dot button) ---- */
+    #itemMenu {
+      position: fixed;
+      display: none;
+      min-width: 120px;
+      background: #fff;
+      border: 1px solid #d8dcdf;
+      border-radius: 5px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      padding: 4px;
+      z-index: 1000;
+    }
+    #itemMenu button {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      color: #2c3e50;
+      padding: 5px 6px;
+      font-size: 11px;
+      border-radius: 4px;
+    }
+    #itemMenu button img { width: 14px; height: 14px; flex: 0 0 14px; display: block; object-fit: contain; }
+    #itemMenu button:hover { background: #ecf0f1; }
+    #itemMenu button.danger { color: #c0392b; }
+    #itemMenu button.danger:hover { background: #fdecea; }
+
+    /* ---- Modals (add / edit / settings / rename) ---- */
+    #modalOverlay, #editOverlay, #settingsOverlay, #renameOverlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(20, 29, 38, 0.45);
+      z-index: 1200;
+      padding: 8px;
+    }
+    #modalOverlay.show, #editOverlay.show, #settingsOverlay.show, #renameOverlay.show { display: flex; }
+    .modal-card {
+      width: 100%;
+      max-width: 348px;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 12px 34px rgba(0,0,0,0.3);
+      padding: 10px;
+    }
+    .modal-card h3 {
+      margin: 0 0 6px;
+      font-size: 13px;
+      color: #2c3e50;
+      text-shadow: 0 1px 0 rgba(255,255,255,0.7);
+    }
+    #renameInput {
+      width: 100%;
+      padding: 7px 8px;
+      font-size: 12px;
+      border: 1px solid #cfd8e3;
+      border-radius: 5px;
+      color: #2c3e50;
+      background: #fff;
+      margin-bottom: 4px;
+    }
+    #renameInput:focus { outline: none; border-color: #7aa7d9; }
+    #modalTextarea, #editTextarea {
+      width: 100%;
+      height: 110px;
+      resize: vertical;
+      padding: 6px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: pre;
+      overflow: auto;
+      border: 1px solid #ccd2d6;
+      border-radius: 5px;
+      color: #2c3e50;
+    }
+    #modalTextarea:focus, #editTextarea:focus { outline: none; border-color: #3498db; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+    #modalCancel, #editCancel, #settingsCancel { background: #95a5a6; }
+    #modalCancel:hover, #editCancel:hover, #settingsCancel:hover { background: #7f8c8d; }
+    #modalSave, #editSave, #settingsSave { background: #2ecc71; }
+    #modalSave:hover, #editSave:hover, #settingsSave:hover { background: #27ae60; }
+
+    /* ---- Toast ---- */
+    #toast {
+      position: fixed;
+      left: 50%;
+      bottom: 10px;
+      transform: translateX(-50%) translateY(8px);
+      max-width: 90%;
+      background: #2c3e50;
+      color: #fff;
+      font-size: 11px;
+      text-align: center;
+      padding: 6px 10px;
+      border-radius: 20px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s, transform 0.2s;
+      z-index: 1300;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #toast.error { background: #c0392b; }
+    .empty-note { text-align: center; color: #888; font-size: 12px; margin-top: 10px; }
+
+    /* ---- Drag & drop file import overlay ---- */
+    #dropOverlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(52, 152, 219, 0.16);
+      border: 3px dashed #3498db;
+      color: #21618c;
+      font-size: 13px;
+      font-weight: bold;
+      z-index: 1400;
+      pointer-events: none;
+    }
+    #dropOverlay.show { display: flex; }
+
+    /* ---- Settings ---- */
+    .settings-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 5px 0;
+      font-size: 11px;
+      color: #2c3e50;
+      border-bottom: 1px solid #eef1f3;
+    }
+    .settings-row:last-of-type { border-bottom: none; }
+    /* A field groups one row with its status line, so the hint stacks *under*
+       the input instead of becoming a third flex child that squeezes it. */
+    .settings-field { border-bottom: 1px solid #eef1f3; }
+    .settings-field:last-of-type { border-bottom: none; }
+    .settings-field .settings-row { border-bottom: none; }
+    .settings-row label { flex: 1; min-width: 0; }
+    .settings-row input[type="text"] {
+      width: 110px;
+      padding: 4px 5px;
+      font-size: 12px;
+      font-family: Consolas, "Courier New", monospace;
+      border: 1px solid #ccd2d6;
+      border-radius: 4px;
+      color: #2c3e50;
+    }
+    .settings-row input[type="checkbox"] { width: 16px; height: 16px; }
+
+    /* Settings: honest feedback about which global shortcut is really active. */
+    .field-hint {
+      margin: 0 0 5px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--muted, #8a8a8a);
+    }
+
+    .field-hint.warn {
+      color: #d9534f;
+    }
+
+    /* No reserved gap while there is no message. */
+    .field-hint:empty { display: none; }
+  </style>
+</head>
+<body>
+  <div id="titleBar" data-tauri-drag-region>
+    <h2 data-tauri-drag-region>Mehedi Clipboard</h2>
+    <button id="winCloseBtn" type="button" title="Close" aria-label="Close window">
+      <img src="assets/close.png" alt="">
+    </button>
+  </div>
+
+  <div class="app-body">
+    <div id="sideRail">
+      <button class="rail-btn" id="addBtn" title="Add Text" aria-label="Add text">
+        <img src="assets/add-text.png" alt="">
+      </button>
+
+      <label class="rail-btn" for="importFile" title="Import JSON or legacy text" aria-label="Import clipboard backup" role="button" tabindex="0">
+        <img src="assets/import.png" alt="">
+      </label>
+      <input type="file" id="importFile" accept=".json,.txt,application/json,text/plain" multiple aria-label="Choose clipboard backup files">
+
+      <button class="rail-btn" id="exportBtn" title="Export JSON" aria-label="Export clipboard backup">
+        <img src="assets/export.png" alt="">
+      </button>
+
+      <button class="rail-btn" id="settingsBtn" title="Settings" aria-label="Open settings">
+        <img src="assets/settings.png" alt="">
+      </button>
+    </div>
+
+    <div class="main-col">
+      <div id="actionRow">
+        <button id="clearAllInline" type="button" title="Clear All (pinned items stay)" aria-label="Clear all unpinned items" style="display: none;">Clear All</button>
+      </div>
+      <div id="tabsBar" role="tablist" aria-label="Imported clipboard groups"></div>
+      <div id="clipboardList" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <div id="itemMenu" role="menu" aria-label="Clipboard item actions"></div>
+
+  <div id="modalOverlay" role="dialog" aria-modal="true" aria-labelledby="addTextTitle">
+    <div class="modal-card">
+      <h3 id="addTextTitle">Add Text</h3>
+      <textarea id="modalTextarea" spellcheck="false" aria-label="Clipboard text" placeholder="Paste your text here..."></textarea>
+      <div class="modal-actions">
+        <button id="modalCancel">Cancel</button>
+        <button id="modalSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="editOverlay" role="dialog" aria-modal="true" aria-labelledby="editTextTitle">
+    <div class="modal-card">
+      <h3 id="editTextTitle">Edit Item</h3>
+      <textarea id="editTextarea" spellcheck="false" aria-label="Edit clipboard text"></textarea>
+      <div class="modal-actions">
+        <button id="editCancel">Cancel</button>
+        <button id="editSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settingsOverlay" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-card">
+      <h3 id="settingsTitle">Settings</h3>
+      <div class="settings-field">
+        <div class="settings-row">
+          <label for="shortcutInput">Global shortcut</label>
+          <input type="text" id="shortcutInput" spellcheck="false" placeholder="CommandOrControl+Shift+V">
+        </div>
+        <p class="field-hint" id="shortcutStatus" role="status" aria-live="polite"></p>
+      </div>
+      <div class="settings-row">
+        <label for="autoStartToggle">Start on system startup</label>
+        <input type="checkbox" id="autoStartToggle">
+      </div>
+      <div class="settings-row">
+        <label for="autoCaptureToggle">Auto-capture clipboard history</label>
+        <input type="checkbox" id="autoCaptureToggle">
+      </div>
+      <div class="modal-actions">
+        <button id="settingsCancel">Close</button>
+        <button id="settingsSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="renameOverlay" role="dialog" aria-modal="true" aria-labelledby="renameTitle">
+    <div class="modal-card">
+      <h3 id="renameTitle">Rename Tab</h3>
+      <input type="text" id="renameInput" spellcheck="false" maxlength="200" aria-label="Tab name" placeholder="Tab name">
+      <div class="modal-actions">
+        <button id="renameCancel">Cancel</button>
+        <button id="renameSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dropOverlay">Drop .json / .txt files to import</div>
+
+  <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="limits.js"></script>
+  <script src="tauri-bridge.js"></script>
+  <script src="renderer-utils.js"></script>
+  <script src="renderer-dom.js"></script>
+  <script src="smooth-scroll.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

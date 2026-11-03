@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Narrowest permission set for Mehedi Clipboard: the UI only listens for events and drags the title bar; every window/clipboard action goes through the app's own Rust commands.","local":true,"windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten","core:window:allow-start-dragging"]}}

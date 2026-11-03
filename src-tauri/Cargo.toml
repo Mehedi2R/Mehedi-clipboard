@@ -1,0 +1,42 @@
+[package]
+name = "mehedi-clipboard"
+version = "3.3.1"
+description = "Mehedi Clipboard Copy & Paste"
+authors = ["Mehedi2R"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", default-features = false, features = [
+  "tray-icon",
+  "wry",
+  "common-controls-v6",
+] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+# Autostart is only reachable on Windows, and the clipboard sequence-number
+# polling / SendInput paste need the Win32 bindings.
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-autostart = "2"
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_DataExchange",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
